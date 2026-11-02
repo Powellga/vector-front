@@ -1,0 +1,872 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vector Front</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh;cursor:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+/* =========================================================
+   VECTOR FRONT - an original wireframe tank combat game
+   Single self-contained file. Sound is synthesized live.
+   ========================================================= */
+
+// ---------- basics ----------
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const TAU = Math.PI * 2, S = 800;               // world is an 800x800 torus
+const rnd = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const mod = a => ((a % S) + S) % S;
+const wrap = d => ((d + S / 2) % S + S) % S - S / 2;
+const angN = a => { a = (a + Math.PI) % TAU; if (a < 0) a += TAU; return a - Math.PI; };
+
+const WCOL = '90,230,255';    // terrain / obstacles
+const MCOL = '70,170,230';    // mountains
+const ECOL = '150,255,110';   // enemies
+const DCOL = '255,205,90';    // supply drone
+const PSH  = '235,255,255';   // player shell
+const ESH  = '255,110,80';    // enemy shell
+const HUD  = '255,176,40';    // amber HUD
+const RED  = '255,70,50';
+
+let W, H, DPR, F, HY, scanPat, vignette;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  F = W * 0.65; HY = H * 0.54;
+  const pc = document.createElement('canvas'); pc.width = 4; pc.height = 3;
+  const px = pc.getContext('2d'); px.fillStyle = 'rgba(0,0,0,0.28)'; px.fillRect(0, 2, 4, 1);
+  scanPat = ctx.createPattern(pc, 'repeat');
+  vignette = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.75);
+  vignette.addColorStop(0, 'rgba(0,0,0,0)'); vignette.addColorStop(1, 'rgba(0,0,0,0.7)');
+}
+addEventListener('resize', resize); resize();
+
+// ---------- wireframe models ----------
+function frustM(n, rb, rt, h, y0 = 0, rot = 0) {
+  const v = [], e = [];
+  for (let i = 0; i < n; i++) { const a = rot + i / n * TAU; v.push([Math.sin(a) * rb, y0, Math.cos(a) * rb]); }
+  for (let i = 0; i < n; i++) { const a = rot + i / n * TAU; v.push([Math.sin(a) * rt, y0 + h, Math.cos(a) * rt]); }
+  for (let i = 0; i < n; i++) e.push([i, (i + 1) % n], [n + i, n + (i + 1) % n], [i, n + i]);
+  return { v, e };
+}
+function pyrM(n, r, h, rot = 0) {
+  const v = [], e = [];
+  for (let i = 0; i < n; i++) { const a = rot + i / n * TAU; v.push([Math.sin(a) * r, 0, Math.cos(a) * r]); }
+  v.push([0, h, 0]);
+  for (let i = 0; i < n; i++) e.push([i, (i + 1) % n], [i, n]);
+  return { v, e };
+}
+function merge(...ms) {
+  const v = [], e = [];
+  for (const m of ms) { const o = v.length; v.push(...m.v); for (const [a, b] of m.e) e.push([a + o, b + o]); }
+  return { v, e };
+}
+function lines(...pairs) {
+  const v = [], e = [];
+  for (const [p, q] of pairs) { e.push([v.length, v.length + 1]); v.push(p, q); }
+  return { v, e };
+}
+function octM(rx, ry, rz) {
+  return { v: [[rx, 0, 0], [-rx, 0, 0], [0, ry, 0], [0, -ry, 0], [0, 0, rz], [0, 0, -rz]],
+    e: [[0, 2], [0, 3], [0, 4], [0, 5], [1, 2], [1, 3], [1, 4], [1, 5], [2, 4], [4, 3], [3, 5], [5, 2]] };
+}
+function ringM(n) {
+  const v = [], e = [];
+  for (let i = 0; i < n; i++) { const a = i / n * TAU; v.push([Math.sin(a), 0, Math.cos(a)]); e.push([i, (i + 1) % n]); }
+  return { v, e };
+}
+
+// Hover tank ("Skimmer")
+const SKIM = {
+  v: [
+    [-1.3, .35, -1.7], [1.3, .35, -1.7], [1.3, .35, 1.5], [-1.3, .35, 1.5],
+    [-1.0, .95, -1.5], [1.0, .95, -1.5], [.7, .8, 1.0], [-.7, .8, 1.0],
+    [0, .45, 2.4],
+    [-1.5, .06, -1.9], [1.5, .06, -1.9], [1.5, .06, 1.7], [-1.5, .06, 1.7],
+    [-.55, .95, -.9], [.55, .95, -.9], [.45, .95, .2], [-.45, .95, .2],
+    [-.35, 1.4, -.7], [.35, 1.4, -.7], [.3, 1.35, 0], [-.3, 1.35, 0],
+    [0, 1.18, .1], [0, 1.18, 2.7]
+  ],
+  e: [[0, 1], [1, 2], [3, 0], [2, 8], [8, 3], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7], [6, 8], [7, 8],
+    [9, 10], [10, 11], [11, 12], [12, 9], [0, 9], [1, 10], [2, 11], [3, 12],
+    [13, 14], [14, 15], [15, 16], [16, 13], [17, 18], [18, 19], [19, 20], [20, 17], [13, 17], [14, 18], [15, 19], [16, 20], [21, 22]]
+};
+// Ramming drone ("Strider")
+const STRI = merge(octM(1.8, .9, 1.8), (() => { const m = ringM(4); m.v = m.v.map(p => [p[0] * .95, .25, p[2] * .95]); return m; })(),
+  (() => { const m = ringM(4); m.v = m.v.map(p => [p[0] * .95, -.25, p[2] * .95]); return m; })());
+// Gun tower ("Pylon")
+const PYB = merge(frustM(4, 2.6, 2.6, .5, 0, Math.PI / 4), frustM(4, 1.8, .8, 4.1, .5, Math.PI / 4));
+const PYH = merge(frustM(4, 1.35, 1.0, 1.1, 4.6, Math.PI / 4),
+  lines([[.28, 5.1, .7], [.28, 5.1, 3.3]], [[-.28, 5.1, .7], [-.28, 5.1, 3.3]], [[0, 5.7, -.4], [0, 7.2, -.9]]));
+// Supply drone
+const DRONE = (() => {
+  const v = [], e = [];
+  for (let i = 0; i < 6; i++) { const a = i / 6 * TAU; v.push([Math.sin(a) * .9, Math.cos(a) * .55, -2.4]); }
+  for (let i = 0; i < 6; i++) { const a = i / 6 * TAU; v.push([Math.sin(a) * .9, Math.cos(a) * .55, 1.6]); }
+  v.push([0, 0, 3.2]);
+  for (let i = 0; i < 6; i++) e.push([i, (i + 1) % 6], [6 + i, 6 + (i + 1) % 6], [i, 6 + i], [6 + i, 12]);
+  return merge({ v, e }, lines([[-.9, 0, -1.4], [-3.2, 0, -.6]], [[-3.2, 0, -.6], [-.9, 0, 1.0]],
+    [[.9, 0, -1.4], [3.2, 0, -.6]], [[3.2, 0, -.6], [.9, 0, 1.0]], [[0, .55, -2.4], [0, 1.6, -2.9]], [[0, 1.6, -2.9], [0, .55, -1.2]]));
+})();
+const SHELL_P = merge(octM(.28, .28, .5), lines([[0, 0, -.5], [0, 0, -3.2]]));
+const SHELL_E = merge(octM(.45, .45, .45), lines([[0, 0, -.45], [0, 0, -2.4]]));
+const RING = ringM(28);
+
+// ---------- world ----------
+let obstacles = [];
+function makeWorld() {
+  obstacles = [];
+  let tries = 0;
+  while (obstacles.length < 70 && tries++ < 2000) {
+    const x = Math.random() * S, z = Math.random() * S, t = Math.random();
+    let o;
+    if (t < .32) { const s = rnd(3.5, 6); o = { m: frustM(4, s * .707, s * .707, s, 0, Math.PI / 4), r: s * .62, h: s }; }
+    else if (t < .62) { const r = rnd(3, 4.5), h = rnd(4, 7); o = { m: pyrM(4, r, h, Math.PI / 4), r: r * .78, h }; }
+    else if (t < .8) { const h = rnd(7, 12); o = { m: frustM(8, 1.4, 1.2, h), r: 1.5, h }; }
+    else { o = { m: frustM(6, 3.8, 2.5, 2.4), r: 3.5, h: 2.4 }; }
+    o.x = x; o.z = z; o.yaw = Math.random() * TAU;
+    if (obstacles.some(q => Math.hypot(wrap(q.x - x), wrap(q.z - z)) < q.r + o.r + 8)) continue;
+    obstacles.push(o);
+  }
+}
+// distant mountains, stars and a ringed planet (fixed to the sky, rotate with heading only)
+const MTN = [], STARS = [];
+(function () {
+  const pts = []; let a = 0;
+  while (a < TAU - .1) {
+    const r = Math.random();
+    if (r < .45) pts.push([a, rnd(.055, .14)]);
+    else if (r < .55) { const h = rnd(.04, .07); pts.push([a, h]); a += rnd(.05, .1); pts.push([a, h]); }
+    else pts.push([a, rnd(0, .025)]);
+    a += rnd(.07, .2);
+  }
+  pts.push([TAU, pts[0][1]]);
+  MTN.push(pts);
+  for (let i = 1; i < pts.length - 1; i++)
+    if (pts[i][1] > .075 && Math.random() < .65)
+      MTN.push([pts[i], [pts[i][0] + rnd(-.05, .08), pts[i][1] * rnd(.3, .55)], [pts[i][0] + rnd(.04, .12), 0]]);
+  for (let i = 0; i < 90; i++) STARS.push([Math.random() * TAU, rnd(.16, .75), Math.random() < .2 ? 2 : 1]);
+})();
+const PLANET = [2.2, .36];
+
+// ---------- game state ----------
+const P = { x: 400, z: 400, h: 0, v: 0, armor: 100, lives: 3, reload: 0 };
+let enemies = [], shells = [], debris = [], rings = [];
+let state = 'title', paused = false, T = 0;
+let score = 0, hi = 0, wave = 1, kills = 0, killsNeeded = 6, nextLife = 30000;
+let spawnT = 0, supplyT = 40, msgText = '', msgT = 0, shake = 0, flash = 0, staticT = 0, dieT = 0, overT = 0;
+let lastHit = -10, bumpT = 0, sweep = 0, lockT = 0, locked = null, camY = 1.5, CH = 1, SH = 0;
+try { hi = +localStorage.getItem('vectorfront.hi') || 0; } catch (e) { }
+function saveHi() { if (score > hi) { hi = score; try { localStorage.setItem('vectorfront.hi', hi); } catch (e) { } } }
+
+// ---------- audio (all synthesized) ----------
+let AC = null, master, noiseBuf, eng = null, muted = false;
+function initAudio() {
+  if (AC) { if (AC.state === 'suspended') AC.resume(); return; }
+  try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
+  const comp = AC.createDynamicsCompressor();
+  master = AC.createGain(); master.gain.value = .55;
+  master.connect(comp); comp.connect(AC.destination);
+  noiseBuf = AC.createBuffer(1, AC.sampleRate * 2, AC.sampleRate);
+  const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const o1 = AC.createOscillator(), o2 = AC.createOscillator(), o3 = AC.createOscillator();
+  o1.type = 'sawtooth'; o2.type = 'square'; o3.type = 'sine';
+  o1.frequency.value = 38; o2.frequency.value = 39.3; o3.frequency.value = 19;
+  const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 170; lp.Q.value = 3;
+  const g = AC.createGain(); g.gain.value = 0;
+  o1.connect(lp); o2.connect(lp); o3.connect(lp); lp.connect(g); g.connect(master);
+  o1.start(); o2.start(); o3.start();
+  eng = { o1, o2, o3, lp, g };
+}
+function dest(pan) {
+  if (pan && AC.createStereoPanner) { const p = AC.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); p.connect(master); return p; }
+  return master;
+}
+function tone(type, f0, f1, dur, vol, pan = 0, delay = 0) {
+  if (!AC || vol < .003) return;
+  const t = AC.currentTime + delay, o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t);
+  if (f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(f1, 1), t + dur);
+  g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + .006); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  o.connect(g); g.connect(dest(pan)); o.start(t); o.stop(t + dur + .05);
+}
+function nz(dur, vol, ft, f0, f1, q, pan = 0, delay = 0) {
+  if (!AC || vol < .003) return;
+  const t = AC.currentTime + delay, s = AC.createBufferSource(), f = AC.createBiquadFilter(), g = AC.createGain();
+  s.buffer = noiseBuf; s.loop = true;
+  f.type = ft; f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + dur); f.Q.value = q;
+  g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(vol, t + .01); g.gain.exponentialRampToValueAtTime(.0001, t + dur);
+  s.connect(f); f.connect(g); g.connect(dest(pan)); s.start(t, Math.random()); s.stop(t + dur + .05);
+}
+const sfx = {
+  fire() { nz(.5, .9, 'lowpass', 3500, 120, 1); tone('sine', 190, 38, .4, .9); tone('square', 1100, 180, .09, .12); nz(.08, .4, 'highpass', 5000, 3000, .7); },
+  efire(v, p) { nz(.3, .5 * v, 'bandpass', 2000, 280, 2, p); tone('sawtooth', 520, 110, .22, .22 * v, p); },
+  boom(v, p, big) { nz(big ? 2 : 1.3, v, 'lowpass', 2600, 50, .8, p); tone('sine', 95, 24, big ? 1.4 : .9, .9 * v, p); nz(.18, .5 * v, 'highpass', 4500, 1800, .6, p); nz(.6, .3 * v, 'bandpass', 900, 200, 3, p, .12); },
+  hit() { nz(.7, 1, 'lowpass', 6000, 160, 1.2); tone('sawtooth', 150, 35, .6, .5); tone('square', 2600, 700, .18, .15); },
+  clank(v, p) { tone('triangle', 430, 300, .14, .4 * v, p); tone('triangle', 1170, 880, .09, .2 * v, p); nz(.07, .3 * v, 'highpass', 3000, 2500, .5, p); },
+  blip(hiPitch) { tone('sine', hiPitch ? 1650 : 1080, hiPitch ? 1650 : 1080, .07, .1); },
+  lock() { tone('triangle', 1320, 1320, .045, .07); },
+  warn(v, p) { tone('square', 760, 760, .07, .09 * v, p); tone('square', 1010, 1010, .07, .09 * v, p, .09); },
+  wave() { [392, 523, 659, 784].forEach((f, i) => tone('square', f, f, i === 3 ? .45 : .13, .1, 0, i * .12)); },
+  repair() { [523, 659, 784, 1047, 1319].forEach((f, i) => tone('triangle', f, f, .14, .14, 0, i * .07)); },
+  life() { [784, 988, 1175, 1568, 1175, 1568].forEach((f, i) => tone('square', f, f, .1, .08, 0, i * .08)); },
+  die() { this.boom(1, 0, true); nz(2.8, .45, 'bandpass', 900, 90, .6, 0, .2); tone('sawtooth', 320, 28, 2.2, .3, 0, .1); },
+  over() { [392, 330, 262, 196].forEach((f, i) => tone('square', f, f * .98, .35, .1, 0, .3 + i * .35)); },
+  drone(v, p) { tone('triangle', 1400, 1750, .06, .07 * v, p); tone('triangle', 1400, 1750, .06, .07 * v, p, .1); },
+  start() { tone('sawtooth', 70, 420, .7, .14); nz(.7, .2, 'bandpass', 300, 2500, 4); },
+  dud() { tone('square', 140, 120, .06, .05); }
+};
+function spatial(x, z) {
+  const dx = wrap(x - P.x), dz = wrap(z - P.z), d = Math.hypot(dx, dz) || 1;
+  const cx = dx * CH - dz * SH;
+  return { v: clamp(1.15 - d / 180, .06, 1), p: clamp(cx / d, -1, 1) * .8, d };
+}
+
+// ---------- input ----------
+const K = {};
+const KEYMAP = { ArrowUp: 'up', KeyW: 'up', ArrowDown: 'down', KeyS: 'down', ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', Space: 'fire' };
+addEventListener('keydown', e => {
+  if (KEYMAP[e.code]) { K[KEYMAP[e.code]] = true; e.preventDefault(); }
+  initAudio();
+  if (e.code === 'Enter') {
+    if (state === 'title') startGame();
+    else if (state === 'over' && overT > 1.5) { state = 'title'; spawnAttract(); }
+  }
+  if (e.code === 'KeyP' && (state === 'play' || state === 'dying')) togglePause();
+  if (e.code === 'KeyM' && AC) { muted = !muted; master.gain.value = muted ? 0 : .55; }
+});
+addEventListener('keyup', e => { if (KEYMAP[e.code]) K[KEYMAP[e.code]] = false; });
+addEventListener('blur', () => { for (const k in K) K[k] = false; if (state === 'play' && !paused) togglePause(); });
+function togglePause() { paused = !paused; if (AC) paused ? AC.suspend() : AC.resume(); }
+
+// ---------- helpers ----------
+function msg(t, d = 2.2) { msgText = t; msgT = d; }
+function blocked(x, z, r) {
+  for (const o of obstacles) { const dx = wrap(x - o.x), dz = wrap(z - o.z), rr = o.r + r; if (dx * dx + dz * dz < rr * rr) return o; }
+  return null;
+}
+function los(ax, az, bx, bz) {
+  const dx = wrap(bx - ax), dz = wrap(bz - az), L2 = dx * dx + dz * dz || 1;
+  for (const o of obstacles) {
+    const ox = wrap(o.x - ax), oz = wrap(o.z - az), t = (ox * dx + oz * dz) / L2;
+    if (t <= 0 || t >= 1) continue;
+    const px = dx * t - ox, pz = dz * t - oz;
+    if (px * px + pz * pz < o.r * o.r) return false;
+  }
+  return true;
+}
+function addScore(n) {
+  score += n;
+  if (score >= nextLife) { nextLife += 30000; P.lives++; sfx.life(); msg('BONUS TANK'); }
+}
+
+// ---------- game flow ----------
+function clearSpot() {
+  for (let i = 0; i < 200; i++) { const x = Math.random() * S, z = Math.random() * S; if (!blocked(x, z, 8)) return [x, z]; }
+  return [0, 0];
+}
+function spawnAttract() {
+  enemies = []; shells = [];
+  for (let i = 0; i < 4; i++) spawnEnemy('sk');
+}
+function startGame() {
+  makeWorld();
+  [P.x, P.z] = clearSpot(); P.h = Math.random() * TAU; P.v = 0; P.armor = 100; P.lives = 3; P.reload = 0;
+  enemies = []; shells = []; debris = []; rings = [];
+  score = 0; wave = 1; kills = 0; killsNeeded = 6; nextLife = 30000;
+  spawnT = 1.5; supplyT = rnd(30, 45); state = 'play'; paused = false;
+  sfx.start(); msg('WAVE 1 - ENGAGE', 2.5);
+}
+function spawnEnemy(type) {
+  if (!type) {
+    const r = Math.random();
+    type = 'sk';
+    if (wave >= 2 && r < .28) type = 'st';
+    else if (wave >= 3 && r < .48) type = 'py';
+  }
+  for (let i = 0; i < 40; i++) {
+    const a = Math.random() * TAU, d = type === 'py' ? rnd(70, 120) : rnd(110, 170);
+    const x = mod(P.x + Math.sin(a) * d), z = mod(P.z + Math.cos(a) * d);
+    if (blocked(x, z, 4)) continue;
+    const e = { type, x, z, y: 0, yaw: Math.random() * TAU, cd: rnd(1.5, 3), t: Math.random() * 10, blipT: -10, ph: Math.random() * 6, hp: 1, hitT: 0 };
+    if (type === 'sk') { e.spd = Math.min(7 + wave * .7, 15); e.tr = Math.min(.9 + wave * .1, 1.7); e.mode = 'strafe'; e.mt = rnd(1, 3); e.side = Math.random() < .5 ? -1 : 1; e.rad = 2.1; }
+    if (type === 'st') { e.spd = Math.min(17 + wave, 27); e.y = 1.6; e.spin = 0; e.warnT = 0; e.rad = 1.9; }
+    if (type === 'py') { e.head = Math.random() * TAU; e.hp = 2; e.burst = 0; e.bt = 0; e.rad = 2.3; }
+    enemies.push(e); return e;
+  }
+}
+function spawnSupply() {
+  const a = Math.random() * TAU, d = 110;
+  const x = mod(P.x + Math.sin(a) * d), z = mod(P.z + Math.cos(a) * d);
+  const yaw = Math.atan2(wrap(P.x - x), wrap(P.z - z)) + rnd(-.35, .35);
+  enemies.push({ type: 'dr', x, z, y: 2.3, yaw, spd: 13, life: 17, t: 0, blipT: -10, rad: 2.6, hp: 1, hitT: 0, chirp: 0 });
+  msg('SUPPLY DRONE DETECTED');
+}
+function nextWave() {
+  wave++; kills = 0; killsNeeded = 4 + wave * 2;
+  addScore(wave * 500); sfx.wave(); msg('WAVE ' + wave + ' - BONUS ' + wave * 500, 3);
+}
+function damage(n) {
+  if (state !== 'play') return;
+  P.armor -= n; lastHit = T; shake = Math.min(1.4, shake + n / 35); flash = .55; staticT = .4; sfx.hit();
+  if (P.armor <= 0) { P.armor = 0; die(); }
+  else if (P.armor < 35) msg('ARMOR CRITICAL', 1.6);
+}
+function die() {
+  state = 'dying'; dieT = 3.2; staticT = 3.2; shake = 1.6; sfx.die();
+  explode(P.x + Math.sin(P.h) * 3, 1, P.z + Math.cos(P.h) * 3, frustM(4, 2, 1.5, 2, 0, .7), 0, WCOL, true);
+}
+function respawn() {
+  P.lives--;
+  if (P.lives <= 0) { state = 'over'; overT = 0; saveHi(); sfx.over(); return; }
+  P.armor = 100; P.v = 0; state = 'play'; shells = [];
+  for (const e of enemies) {
+    const d = Math.hypot(wrap(e.x - P.x), wrap(e.z - P.z));
+    if (d < 90) { e.dead = true; }
+  }
+  enemies = enemies.filter(e => !e.dead); spawnT = 2.5;
+  msg('NEW TANK DEPLOYED', 2.5); sfx.start();
+}
+function explode(x, y, z, m, yaw, col, big) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const tr = p => [p[0] * cy + p[2] * sy, p[1], -p[0] * sy + p[2] * cy];
+  const edges = m.e.slice(0, 30);
+  for (const [i, j] of edges) {
+    const a = tr(m.v[i]), b = tr(m.v[j]);
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, mz = (a[2] + b[2]) / 2;
+    const out = Math.hypot(mx, mz) || 1, sp = rnd(5, big ? 22 : 15);
+    debris.push({ x: x + mx, y: y + my, z: z + mz, hx: (b[0] - a[0]) / 2, hy: (b[1] - a[1]) / 2, hz: (b[2] - a[2]) / 2,
+      vx: mx / out * sp + rnd(-4, 4), vy: rnd(6, big ? 20 : 15), vz: mz / out * sp + rnd(-4, 4),
+      wy: rnd(-8, 8), wx: rnd(-8, 8), life: rnd(2, 3.4), col });
+  }
+  for (let i = 0; i < (big ? 18 : 10); i++) {
+    const a = Math.random() * TAU, e = rnd(.2, 1.3), sp = rnd(10, 30);
+    debris.push({ x, y, z, hx: Math.sin(a) * .3, hy: .3, hz: Math.cos(a) * .3, vx: Math.sin(a) * Math.cos(e) * sp, vy: Math.sin(e) * sp, vz: Math.cos(a) * Math.cos(e) * sp,
+      wy: rnd(-12, 12), wx: rnd(-12, 12), life: rnd(.6, 1.3), col: '255,240,200' });
+  }
+  rings.push({ x, z, r: .5, sp: big ? 30 : 22, life: 1, col });
+  if (big) rings.push({ x, z, r: .5, sp: 14, life: 1.4, col: '255,240,200' });
+}
+function killEnemy(e, scored) {
+  e.dead = true;
+  const m = e.type === 'sk' ? SKIM : e.type === 'st' ? STRI : e.type === 'py' ? merge(PYB, PYH) : DRONE;
+  explode(e.x, e.y + (e.type === 'sk' ? .3 : 0), e.z, m, e.type === 'st' ? e.spin : e.type === 'py' ? e.head : e.yaw, e.type === 'dr' ? DCOL : ECOL, e.type === 'py');
+  const s = spatial(e.x, e.z); sfx.boom(s.v, s.p, e.type === 'py');
+  if (e.type === 'dr') {
+    if (scored) { addScore(500); P.armor = Math.min(100, P.armor + 50); sfx.repair(); msg('ARMOR RESTORED +50'); }
+    return;
+  }
+  if (scored) addScore(e.type === 'sk' ? 1000 : e.type === 'st' ? 1500 : 2500);
+  if (state === 'play') { kills++; if (kills >= killsNeeded) nextWave(); }
+}
+
+// ---------- update ----------
+function update(dt) {
+  if (state === 'title') { P.h += dt * .12; P.x = mod(P.x + Math.sin(P.h) * 5 * dt); P.z = mod(P.z + Math.cos(P.h) * 5 * dt); P.v = 5; }
+  if (state === 'play') updatePlayer(dt);
+  if (state === 'dying') { P.v *= .9; dieT -= dt; if (dieT <= 0) respawn(); }
+  if (state === 'over') overT += dt;
+
+  CH = Math.cos(P.h); SH = Math.sin(P.h);
+  updateEnemies(dt);
+  updateShells(dt);
+  updateFx(dt);
+
+  if (state === 'play') {
+    const active = enemies.filter(e => e.type !== 'dr').length, maxA = Math.min(1 + Math.ceil(wave / 2), 5);
+    spawnT -= dt;
+    if (active < maxA && spawnT <= 0) { spawnEnemy(); spawnT = rnd(2, 4.5); }
+    supplyT -= dt;
+    if (supplyT <= 0) { supplyT = rnd(40, 60); if (!enemies.some(e => e.type === 'dr')) spawnSupply(); }
+    if (T - lastHit > 4 && P.armor < 100) P.armor = Math.min(100, P.armor + 2.5 * dt);
+  }
+
+  // radar sweep + blips
+  const prev = sweep; sweep = (sweep + 2.4 * dt) % TAU;
+  for (const e of enemies) {
+    const dx = wrap(e.x - P.x), dz = wrap(e.z - P.z);
+    if (dx * dx + dz * dz > 170 * 170) continue;
+    const a = (Math.atan2(dx * CH - dz * SH, dx * SH + dz * CH) + TAU) % TAU;
+    const crossed = prev <= sweep ? (a > prev && a <= sweep) : (a > prev || a <= sweep);
+    if (crossed) { e.blipT = T; if (state === 'play') sfx.blip(e.type === 'dr'); }
+  }
+
+  // engine sound
+  if (eng) {
+    const sp = Math.abs(P.v), on = (state === 'play' || state === 'title') && !paused;
+    const t = AC.currentTime;
+    eng.g.gain.setTargetAtTime(on ? (state === 'title' ? .035 : .07 + sp * .004) : 0, t, .15);
+    eng.o1.frequency.setTargetAtTime(34 + sp * 2.3, t, .2);
+    eng.o2.frequency.setTargetAtTime(35.2 + sp * 2.4, t, .2);
+    eng.o3.frequency.setTargetAtTime(17 + sp * 1.1, t, .2);
+    eng.lp.frequency.setTargetAtTime(150 + sp * 28, t, .2);
+  }
+}
+
+function updatePlayer(dt) {
+  const fwd = (K.up ? 1 : 0) - (K.down ? 1 : 0), turn = (K.right ? 1 : 0) - (K.left ? 1 : 0);
+  const target = fwd > 0 ? 16 : fwd < 0 ? -9 : 0;
+  P.v += clamp(target - P.v, -28 * dt, 28 * dt);
+  P.h = angN(P.h + turn * 1.1 * dt);
+  let nx = P.x + Math.sin(P.h) * P.v * dt, nz = P.z + Math.cos(P.h) * P.v * dt;
+  const o = blocked(nx, nz, 1.7);
+  bumpT -= dt;
+  if (o) {
+    const dx = wrap(nx - o.x), dz = wrap(nz - o.z), d = Math.hypot(dx, dz) || 1;
+    nx = o.x + dx / d * (o.r + 1.7); nz = o.z + dz / d * (o.r + 1.7);
+    if (Math.abs(P.v) > 5 && bumpT <= 0) { sfx.clank(1, 0); shake += .35; bumpT = .5; }
+    P.v *= .4;
+  }
+  for (const e of enemies) {
+    if (e.type === 'dr' || e.type === 'st') continue;
+    const dx = wrap(nx - e.x), dz = wrap(nz - e.z), d = Math.hypot(dx, dz) || 1, rr = e.rad + 1.7;
+    if (d < rr) { nx = e.x + dx / d * rr; nz = e.z + dz / d * rr; P.v *= .5; }
+  }
+  P.x = mod(nx); P.z = mod(nz);
+
+  P.reload -= dt;
+  if (K.fire) {
+    if (P.reload <= 0) {
+      P.reload = .75;
+      shells.push({ own: true, x: mod(P.x + Math.sin(P.h) * 2.5), z: mod(P.z + Math.cos(P.h) * 2.5), y: 1.2,
+        vx: Math.sin(P.h) * 95, vz: Math.cos(P.h) * 95, life: 1.6, yaw: P.h });
+      sfx.fire(); shake = Math.max(shake, .25);
+    }
+  }
+}
+
+function updateEnemies(dt) {
+  for (const e of enemies) {
+    if (e.dead) continue;
+    e.t += dt; e.hitT -= dt;
+    const dx = wrap(P.x - e.x), dz = wrap(P.z - e.z), dist = Math.hypot(dx, dz), angTo = Math.atan2(dx, dz);
+    const live = state === 'play';
+    if (dist > 330) { e.dead = true; continue; }
+
+    if (e.type === 'sk') {
+      let desired, spd;
+      e.cd -= dt; e.mt -= dt;
+      if (e.mode === 'aim') {
+        desired = angTo; spd = e.spd * .3;
+        const err = Math.abs(angN(angTo - e.yaw));
+        if (live && err < .07 && e.cd <= 0 && dist < 125 && los(e.x, e.z, P.x, P.z)) {
+          fireEnemy(e, dist, 46, 34);
+          e.cd = Math.max(1.4, 3.6 - wave * .22) + rnd(0, 1.2);
+          e.mode = 'strafe'; e.mt = rnd(1.5, 3.5); e.side = Math.random() < .5 ? -1 : 1;
+        } else if (e.mt <= 0) { e.mode = 'strafe'; e.mt = rnd(1.5, 3); }
+      } else {
+        if (dist > 75) desired = angTo + e.side * .3;
+        else if (dist < 28) desired = angTo + Math.PI - e.side * .5;
+        else desired = angTo + e.side * 1.15;
+        spd = e.spd;
+        if (e.mt <= 0) {
+          if (e.cd <= .6 && dist < 125) { e.mode = 'aim'; e.mt = 3.5; }
+          else { e.mt = rnd(1.5, 3); e.side = -e.side; }
+        }
+      }
+      e.yaw = angN(e.yaw + clamp(angN(desired - e.yaw), -e.tr * dt, e.tr * dt));
+      const nx = e.x + Math.sin(e.yaw) * spd * dt, nz = e.z + Math.cos(e.yaw) * spd * dt;
+      if (blocked(nx, nz, 2.2)) { e.side = -e.side; e.yaw += e.side * .6; e.mode = 'strafe'; e.mt = rnd(.8, 1.6); }
+      else if (dist > 4 || !live) { e.x = mod(nx); e.z = mod(nz); }
+      e.y = .12 * Math.sin(T * 3 + e.ph);
+    }
+    else if (e.type === 'st') {
+      const desired = angTo + Math.sin(e.t * 2.3) * (dist > 25 ? .65 : .12);
+      e.yaw = angN(e.yaw + clamp(angN(desired - e.yaw), -2.6 * dt, 2.6 * dt));
+      e.x = mod(e.x + Math.sin(e.yaw) * e.spd * dt); e.z = mod(e.z + Math.cos(e.yaw) * e.spd * dt);
+      e.spin += dt * 5;
+      let ty = 1.6 + Math.sin(e.t * 3.5) * .35;
+      for (const o of obstacles) { const ox = wrap(e.x - o.x), oz = wrap(e.z - o.z); if (ox * ox + oz * oz < (o.r + 2.5) ** 2) ty = Math.max(ty, o.h + 1.6); }
+      e.y += (ty - e.y) * Math.min(1, dt * 6);
+      if (live && dist < 60 && T - e.warnT > Math.max(.15, dist / 120)) { const s = spatial(e.x, e.z); sfx.warn(s.v, s.p); e.warnT = T; }
+      if (live && dist < 2.9 && e.y < 3.5) { damage(45); killEnemy(e, false); }
+    }
+    else if (e.type === 'py') {
+      e.cd -= dt;
+      e.head = angN(e.head + clamp(angN(angTo - e.head), -.9 * dt, .9 * dt));
+      if (e.burst > 0) {
+        e.bt -= dt;
+        if (e.bt <= 0 && live) { fireEnemy(e, dist, 58, 18, e.head, 3.3, 5.1); e.burst--; e.bt = .22; }
+      } else if (live && e.cd <= 0 && dist < 140 && Math.abs(angN(angTo - e.head)) < .05 && los(e.x, e.z, P.x, P.z)) {
+        e.burst = 3; e.bt = 0; e.cd = Math.max(2.2, 5 - wave * .15) + rnd(0, 1.5);
+      }
+    }
+    else if (e.type === 'dr') {
+      e.x = mod(e.x + Math.sin(e.yaw) * e.spd * dt); e.z = mod(e.z + Math.cos(e.yaw) * e.spd * dt);
+      e.y = 2.3 + Math.sin(e.t * 2) * .3;
+      e.life -= dt; if (e.life <= 0) e.dead = true;
+      e.chirp -= dt;
+      if (live && e.chirp <= 0 && dist < 100) { const s = spatial(e.x, e.z); sfx.drone(s.v, s.p); e.chirp = 1.3; }
+    }
+  }
+  // keep ground enemies apart
+  for (let i = 0; i < enemies.length; i++) for (let j = i + 1; j < enemies.length; j++) {
+    const a = enemies[i], b = enemies[j];
+    if (a.type === 'dr' || b.type === 'dr' || a.type === 'py' && b.type === 'py') continue;
+    const dx = wrap(b.x - a.x), dz = wrap(b.z - a.z), d = Math.hypot(dx, dz) || 1, rr = a.rad + b.rad;
+    if (d < rr) {
+      const push = (rr - d) / 2, ux = dx / d, uz = dz / d;
+      if (a.type !== 'py') { a.x = mod(a.x - ux * push); a.z = mod(a.z - uz * push); }
+      if (b.type !== 'py') { b.x = mod(b.x + ux * push); b.z = mod(b.z + uz * push); }
+    }
+  }
+  enemies = enemies.filter(e => !e.dead);
+}
+
+function fireEnemy(e, dist, sp, dmg, yaw, muzzle = 2.7, y = 1.2) {
+  const tf = dist / sp, lead = clamp(.12 * wave, 0, .85);
+  const tx = wrap(P.x - e.x) + Math.sin(P.h) * P.v * tf * lead, tz = wrap(P.z - e.z) + Math.cos(P.h) * P.v * tf * lead;
+  const err = rnd(-.04, .04) * Math.max(0, 1 - wave * .12);
+  const a = Math.atan2(tx, tz) + err, base = yaw === undefined ? e.yaw : yaw;
+  shells.push({ own: false, x: mod(e.x + Math.sin(base) * muzzle), z: mod(e.z + Math.cos(base) * muzzle), y,
+    vx: Math.sin(a) * sp, vz: Math.cos(a) * sp, vy: (1.2 - y) / tf, life: 3.4, dmg, yaw: a });
+  const s = spatial(e.x, e.z); sfx.efire(s.v, s.p);
+}
+
+function updateShells(dt) {
+  for (const s of shells) {
+    s.x = mod(s.x + s.vx * dt); s.z = mod(s.z + s.vz * dt);
+    if (s.vy) { s.y += s.vy * dt; if (s.y <= 1.2) { s.y = 1.2; s.vy = 0; } }
+    s.life -= dt;
+    if (s.life <= 0) { s.dead = true; continue; }
+    const o = blocked(s.x, s.z, 0);
+    if (o && s.y < o.h) {
+      s.dead = true; rings.push({ x: s.x, z: s.z, r: .2, sp: 9, life: .5, col: s.own ? PSH : ESH });
+      const sp = spatial(s.x, s.z); sfx.clank(sp.v * .8, sp.p); continue;
+    }
+    if (s.own) {
+      for (const e of enemies) {
+        const dx = wrap(e.x - s.x), dz = wrap(e.z - s.z);
+        if (dx * dx + dz * dz < e.rad * e.rad && Math.abs(e.y + (e.type === 'py' ? 2.5 : .4) - s.y) < (e.type === 'py' ? 3.5 : 1.6)) {
+          s.dead = true; e.hp--;
+          if (e.hp <= 0) killEnemy(e, true);
+          else { e.hitT = .25; const sp = spatial(e.x, e.z); sfx.clank(sp.v, sp.p); rings.push({ x: s.x, z: s.z, r: .3, sp: 12, life: .5, col: ECOL }); }
+          break;
+        }
+      }
+    } else {
+      const dx = wrap(P.x - s.x), dz = wrap(P.z - s.z);
+      if (dx * dx + dz * dz < 1.9 * 1.9 && state === 'play') { s.dead = true; damage(s.dmg); }
+    }
+  }
+  shells = shells.filter(s => !s.dead);
+  enemies = enemies.filter(e => !e.dead);
+}
+
+function updateFx(dt) {
+  for (const d of debris) {
+    d.vy -= 26 * dt;
+    d.x = mod(d.x + d.vx * dt); d.y += d.vy * dt; d.z = mod(d.z + d.vz * dt);
+    if (d.y < .1 && d.vy < 0) { d.y = .1; d.vy *= -.35; d.vx *= .55; d.vz *= .55; d.wx *= .5; d.wy *= .5; }
+    let c = Math.cos(d.wy * dt), s = Math.sin(d.wy * dt), hx = d.hx * c + d.hz * s, hz = -d.hx * s + d.hz * c;
+    c = Math.cos(d.wx * dt); s = Math.sin(d.wx * dt);
+    const hy = d.hy * c - hz * s; hz = d.hy * s + hz * c;
+    d.hx = hx; d.hy = hy; d.hz = hz;
+    d.life -= dt;
+  }
+  debris = debris.filter(d => d.life > 0);
+  for (const r of rings) { r.r += r.sp * dt; r.sp *= Math.pow(.25, dt); r.life -= dt * .9; }
+  rings = rings.filter(r => r.life > 0);
+  shake = Math.max(0, shake - dt * 2.2); flash = Math.max(0, flash - dt * 2.5); staticT = Math.max(0, staticT - dt);
+  msgT -= dt;
+}
+
+// ---------- 3D rendering ----------
+const NEAR = .3, VIEW = 240, FADE = 175;
+const tv = []; for (let i = 0; i < 80; i++) tv.push([0, 0, 0]);
+function seg(a, b) {
+  let ax = a[0], ay = a[1], az = a[2], bx = b[0], by = b[1], bz = b[2];
+  if (az < NEAR && bz < NEAR) return;
+  if (az < NEAR) { const t = (NEAR - az) / (bz - az); ax += (bx - ax) * t; ay += (by - ay) * t; az = NEAR; }
+  else if (bz < NEAR) { const t = (NEAR - bz) / (az - bz); bx += (ax - bx) * t; by += (ay - by) * t; bz = NEAR; }
+  ctx.moveTo(W / 2 + ax / az * F, HY - ay / az * F);
+  ctx.lineTo(W / 2 + bx / bz * F, HY - by / bz * F);
+}
+function glow(col, a, w = 1.5) {
+  ctx.strokeStyle = `rgba(${col},${a * .2})`; ctx.lineWidth = w * 3.6; ctx.stroke();
+  ctx.strokeStyle = `rgba(${col},${a})`; ctx.lineWidth = w; ctx.stroke();
+}
+function drawModel(m, x, y, z, yaw, col, al = 1, sc = 1) {
+  const ox = wrap(x - P.x), oz = wrap(z - P.z), dist = Math.hypot(ox, oz);
+  if (dist > VIEW) return;
+  const ccz = ox * SH + oz * CH, ccx = ox * CH - oz * SH, rad = 8 * sc;
+  if (ccz < -rad || Math.abs(ccx) > ccz * (W / 2 / F) + rad + 4) return;
+  let a = al; if (dist > FADE) a *= (VIEW - dist) / (VIEW - FADE);
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  for (let i = 0; i < m.v.length; i++) {
+    const p = m.v[i], lx = p[0] * sc, ly = p[1] * sc, lz = p[2] * sc;
+    const wx = ox + lx * cy + lz * sy, wz = oz - lx * sy + lz * cy, t = tv[i];
+    t[0] = wx * CH - wz * SH; t[1] = y + ly - camY; t[2] = wx * SH + wz * CH;
+  }
+  ctx.beginPath();
+  for (const e of m.e) seg(tv[e[0]], tv[e[1]]);
+  glow(col, a);
+}
+function sky(a, e) { const c = Math.cos(a - P.h); return c < .15 ? null : [W / 2 + Math.sin(a - P.h) / c * F, HY - e / c * F]; }
+
+function renderWorld() {
+  // stars
+  for (const s of STARS) {
+    const p = sky(s[0], s[1]); if (!p || p[0] < 0 || p[0] > W || p[1] < 0) continue;
+    ctx.fillStyle = `rgba(190,225,255,${s[2] > 1 ? .7 : .4})`; ctx.fillRect(p[0], p[1], s[2], s[2]);
+  }
+  // planet
+  const pp = sky(PLANET[0], PLANET[1]);
+  if (pp) {
+    const r = F * .045;
+    ctx.beginPath(); ctx.arc(pp[0], pp[1], r, 0, TAU); glow(MCOL, .8);
+    ctx.beginPath(); ctx.ellipse(pp[0], pp[1], r * 2.1, r * .42, -.28, Math.PI * .02, Math.PI * .98); glow(MCOL, .7);
+    ctx.beginPath(); ctx.ellipse(pp[0], pp[1], r * 2.1, r * .42, -.28, Math.PI * 1.12, Math.PI * 1.88); glow(MCOL, .7);
+    ctx.beginPath(); ctx.arc(pp[0] - r * .3, pp[1] - r * .25, r * .18, 0, TAU); glow(MCOL, .4, 1);
+  }
+  // mountains
+  ctx.beginPath();
+  for (const pl of MTN) {
+    for (let i = 0; i < pl.length - 1; i++) {
+      const a = sky(pl[i][0], pl[i][1]), b = sky(pl[i + 1][0], pl[i + 1][1]);
+      if (!a || !b || Math.abs(a[0] - b[0]) > W * 2) continue;
+      ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+    }
+  }
+  glow(MCOL, .85);
+  // horizon
+  ctx.beginPath(); ctx.moveTo(-50, HY); ctx.lineTo(W + 50, HY); glow(WCOL, .9);
+  // ground dots
+  const GS = 16, R = 150;
+  const gx0 = Math.floor((P.x - R) / GS), gz0 = Math.floor((P.z - R) / GS), n = Math.ceil(2 * R / GS);
+  for (let i = 0; i <= n; i++) for (let j = 0; j <= n; j++) {
+    const dx = (gx0 + i) * GS - P.x, dz = (gz0 + j) * GS - P.z, d2 = dx * dx + dz * dz;
+    if (d2 > R * R) continue;
+    const cz = dx * SH + dz * CH; if (cz < 2) continue;
+    const sx = W / 2 + (dx * CH - dz * SH) / cz * F; if (sx < 0 || sx > W) continue;
+    const sy = HY + camY / cz * F;
+    ctx.fillStyle = `rgba(${WCOL},${.55 * (1 - Math.sqrt(d2) / R)})`;
+    const sz = cz < 20 ? 2 : 1.4; ctx.fillRect(sx - sz / 2, sy, sz, sz);
+  }
+  // obstacles
+  for (const o of obstacles) drawModel(o.m, o.x, 0, o.z, o.yaw, WCOL, .95);
+  // enemies
+  for (const e of enemies) {
+    const col = e.hitT > 0 ? '255,255,255' : ECOL;
+    if (e.type === 'sk') drawModel(SKIM, e.x, e.y, e.z, e.yaw, col);
+    else if (e.type === 'st') drawModel(STRI, e.x, e.y, e.z, e.spin, col);
+    else if (e.type === 'py') { drawModel(PYB, e.x, 0, e.z, 0, col); drawModel(PYH, e.x, 0, e.z, e.head, col); }
+    else drawModel(DRONE, e.x, e.y, e.z, e.yaw, e.hitT > 0 ? '255,255,255' : DCOL);
+  }
+  // shells
+  for (const s of shells) drawModel(s.own ? SHELL_P : SHELL_E, s.x, s.y, s.z, s.yaw, s.own ? PSH : ESH);
+  // rings
+  for (const r of rings) drawModel(RING, r.x, .05, r.z, 0, r.col, clamp(r.life, 0, 1), r.r);
+  // debris
+  for (const d of debris) {
+    const ox = wrap(d.x - P.x), oz = wrap(d.z - P.z);
+    if (ox * ox + oz * oz > VIEW * VIEW) continue;
+    const a = tv[0], b = tv[1];
+    let wx = ox - d.hx, wz = oz - d.hz;
+    a[0] = wx * CH - wz * SH; a[1] = d.y - d.hy - camY; a[2] = wx * SH + wz * CH;
+    wx = ox + d.hx; wz = oz + d.hz;
+    b[0] = wx * CH - wz * SH; b[1] = d.y + d.hy - camY; b[2] = wx * SH + wz * CH;
+    ctx.beginPath(); seg(a, b); glow(d.col, clamp(d.life, 0, 1));
+  }
+}
+
+// ---------- HUD ----------
+function txt(s, x, y, size, col, al = 1, align = 'left') {
+  ctx.font = `bold ${size}px "Courier New",Consolas,monospace`;
+  ctx.textAlign = align; ctx.textBaseline = 'middle';
+  ctx.shadowColor = `rgba(${col},.9)`; ctx.shadowBlur = size * .6;
+  ctx.fillStyle = `rgba(${col},${al})`; ctx.fillText(s, x, y);
+  ctx.shadowBlur = 0;
+}
+const pad = (n, l) => String(Math.floor(n)).padStart(l, '0');
+
+function renderHUD() {
+  const sm = Math.max(12, Math.min(18, W / 70));
+  // score block
+  txt('SCORE ' + pad(score, 7), 22, 28, sm * 1.15, HUD);
+  txt('WAVE ' + pad(wave, 2) + '   TARGETS ' + kills + '/' + killsNeeded, 22, 28 + sm * 1.5, sm * .8, HUD, .8);
+  txt('HI ' + pad(Math.max(hi, score), 7), W - 22, 28, sm * 1.15, HUD, 1, 'right');
+  if (muted) txt('SOUND OFF', W - 22, 28 + sm * 1.5, sm * .8, HUD, .7, 'right');
+
+  // compass tape
+  const cx = W / 2, cy = 26, tw = Math.min(340, W * .42), deg = ((P.h * 180 / Math.PI) % 360 + 360) % 360;
+  ctx.beginPath();
+  for (let d = Math.floor((deg - 60) / 10) * 10; d <= deg + 60; d += 10) {
+    const x = cx + (d - deg) / 60 * (tw / 2), dd = ((d % 360) + 360) % 360;
+    const len = dd % 90 === 0 ? 12 : dd % 30 === 0 ? 8 : 4;
+    ctx.moveTo(x, cy); ctx.lineTo(x, cy + len);
+    if (dd % 90 === 0) txt('NESW'[dd / 90], x, cy + 24, sm * .85, HUD, .9, 'center');
+  }
+  ctx.moveTo(cx - tw / 2, cy); ctx.lineTo(cx + tw / 2, cy);
+  ctx.moveTo(cx, cy - 4); ctx.lineTo(cx - 6, cy - 12); ctx.moveTo(cx, cy - 4); ctx.lineTo(cx + 6, cy - 12);
+  glow(HUD, .85, 1.3);
+  txt(pad(deg, 3), cx, cy + 44, sm * .75, HUD, .7, 'center');
+
+  // reticle + lock detection
+  locked = null; let best = 1e9;
+  for (const e of enemies) {
+    const dx = wrap(e.x - P.x), dz = wrap(e.z - P.z), cz = dx * SH + dz * CH;
+    if (cz < 2 || cz > 150) continue;
+    const off = Math.abs((dx * CH - dz * SH) / cz * F);
+    if (off < 30 + 2 * F / cz && off < best && los(P.x, P.z, e.x, e.z)) { best = off; locked = { e, d: cz }; }
+  }
+  const rx = W / 2, ry = HY, R = Math.max(22, Math.min(34, W / 40));
+  const lk = !!locked && state === 'play', col = lk ? '255,230,120' : HUD;
+  ctx.beginPath();
+  for (let i = 0; i < 4; i++) { const a0 = i * Math.PI / 2 + .25; ctx.moveTo(rx + Math.cos(a0) * R, ry + Math.sin(a0) * R); ctx.arc(rx, ry, R, a0, a0 + Math.PI / 2 - .5); }
+  ctx.moveTo(rx - R - 16, ry); ctx.lineTo(rx - R - 4, ry); ctx.moveTo(rx + R + 4, ry); ctx.lineTo(rx + R + 16, ry);
+  ctx.moveTo(rx, ry - R - 16); ctx.lineTo(rx, ry - R - 4); ctx.moveTo(rx, ry + R + 4); ctx.lineTo(rx, ry + R + 16);
+  ctx.moveTo(rx + 2, ry); ctx.arc(rx, ry, 2, 0, TAU);
+  glow(col, lk ? 1 : .75, 1.4);
+  if (lk) {
+    const k = R + 10 + 6 * Math.sin(T * 14);
+    ctx.beginPath();
+    for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
+      ctx.moveTo(rx + sx * k, ry + sy * (k - 9)); ctx.lineTo(rx + sx * k, ry + sy * k); ctx.lineTo(rx + sx * (k - 9), ry + sy * k);
+    }
+    glow(col, 1, 1.6);
+    txt('LOCK  ' + pad(locked.d, 3) + 'm', rx, ry + R + 34, sm * .85, col, 1, 'center');
+    lockT -= 1 / 60;
+    if (lockT <= 0) { sfx.lock(); lockT = .3; }
+  }
+
+  // off-screen contact arrows
+  let left = 0, right = 0;
+  for (const e of enemies) {
+    if (e.type === 'dr') continue;
+    const dx = wrap(e.x - P.x), dz = wrap(e.z - P.z); if (dx * dx + dz * dz > 170 * 170) continue;
+    const a = Math.atan2(dx * CH - dz * SH, dx * SH + dz * CH);
+    if (Math.abs(a) > Math.atan(W / 2 / F) - .02) a > 0 ? right++ : left++;
+  }
+  const pul = .5 + .5 * Math.sin(T * 8);
+  if (left && state === 'play') { ctx.beginPath(); ctx.moveTo(26, HY); ctx.lineTo(42, HY - 12); ctx.moveTo(26, HY); ctx.lineTo(42, HY + 12); ctx.moveTo(38, HY); ctx.lineTo(54, HY - 12); ctx.moveTo(38, HY); ctx.lineTo(54, HY + 12); glow(RED, .4 + .6 * pul, 2); }
+  if (right && state === 'play') { ctx.beginPath(); ctx.moveTo(W - 26, HY); ctx.lineTo(W - 42, HY - 12); ctx.moveTo(W - 26, HY); ctx.lineTo(W - 42, HY + 12); ctx.moveTo(W - 38, HY); ctx.lineTo(W - 54, HY - 12); ctx.moveTo(W - 38, HY); ctx.lineTo(W - 54, HY + 12); glow(RED, .4 + .6 * pul, 2); }
+
+  // radar
+  const RR = Math.max(46, Math.min(78, W * .075)), rcx = RR + 24, rcy = H - RR - 24;
+  ctx.beginPath(); ctx.arc(rcx, rcy, RR, 0, TAU);
+  ctx.moveTo(rcx + RR * .5, rcy); ctx.arc(rcx, rcy, RR * .5, 0, TAU);
+  const half = Math.atan(W / 2 / F);
+  ctx.moveTo(rcx, rcy); ctx.lineTo(rcx + Math.sin(half) * RR, rcy - Math.cos(half) * RR);
+  ctx.moveTo(rcx, rcy); ctx.lineTo(rcx - Math.sin(half) * RR, rcy - Math.cos(half) * RR);
+  glow(HUD, .55, 1.1);
+  for (let i = 0; i < 6; i++) {
+    const a = sweep - i * .07; ctx.beginPath(); ctx.moveTo(rcx, rcy); ctx.lineTo(rcx + Math.sin(a) * RR, rcy - Math.cos(a) * RR);
+    glow(HUD, .8 * (1 - i / 6), 1.2);
+  }
+  for (const e of enemies) {
+    const fade = 1 - (T - e.blipT) / 2.4; if (fade <= 0) continue;
+    const dx = wrap(e.x - P.x), dz = wrap(e.z - P.z);
+    const bx = rcx + (dx * CH - dz * SH) / 170 * RR, by = rcy - (dx * SH + dz * CH) / 170 * RR;
+    ctx.fillStyle = `rgba(${e.type === 'dr' ? DCOL : RED},${fade})`;
+    ctx.shadowColor = `rgba(${e.type === 'dr' ? DCOL : RED},1)`; ctx.shadowBlur = 8;
+    ctx.fillRect(bx - 2.5, by - 2.5, 5, 5); ctx.shadowBlur = 0;
+  }
+  ctx.fillStyle = `rgba(${HUD},1)`; ctx.fillRect(rcx - 1.5, rcy - 1.5, 3, 3);
+
+  // armor / cannon / lives
+  const bw = Math.min(220, W * .22), bx0 = W - bw - 24, by0 = H - 86;
+  const low = P.armor < 35, acol = low ? RED : HUD;
+  txt('ARMOR', bx0, by0, sm * .85, acol, 1);
+  const segs = 10, gap = 3, sw = (bw - gap * (segs - 1)) / segs;
+  for (let i = 0; i < segs; i++) {
+    const fill = clamp(P.armor / 10 - i, 0, 1);
+    ctx.strokeStyle = `rgba(${acol},.5)`; ctx.lineWidth = 1; ctx.strokeRect(bx0 + i * (sw + gap) + .5, by0 + 12.5, sw, 12);
+    if (fill > 0) { ctx.fillStyle = `rgba(${acol},${(low ? .5 + .5 * pul : .85) * fill})`; ctx.fillRect(bx0 + i * (sw + gap), by0 + 12, sw * fill, 13); }
+  }
+  const ready = P.reload <= 0;
+  txt(ready ? 'CANNON READY' : 'LOADING', bx0, by0 + 44, sm * .8, HUD, ready ? 1 : .6);
+  ctx.fillStyle = `rgba(${HUD},.8)`; ctx.fillRect(bx0, by0 + 56, bw * clamp(1 - P.reload / .75, 0, 1), 3);
+  for (let i = 0; i < Math.min(P.lives, 8); i++) {
+    const lx = W - 34 - i * 30, ly = by0 - 26;
+    ctx.beginPath(); ctx.moveTo(lx - 11, ly + 5); ctx.lineTo(lx + 11, ly + 5); ctx.lineTo(lx + 8, ly); ctx.lineTo(lx - 8, ly); ctx.closePath();
+    ctx.moveTo(lx - 4, ly); ctx.lineTo(lx - 3, ly - 4); ctx.lineTo(lx + 3, ly - 4); ctx.lineTo(lx + 4, ly); ctx.moveTo(lx + 2, ly - 2); ctx.lineTo(lx + 12, ly - 2);
+    glow(HUD, .9, 1.2);
+  }
+
+  // messages
+  if (msgT > 0 && state !== 'over') {
+    const a = msgT < .5 ? msgT * 2 : (Math.sin(T * 20) > -.6 ? 1 : .4);
+    txt(msgText, W / 2, H * .27, sm * 1.3, HUD, a, 'center');
+  }
+}
+
+function renderStatic(amount) {
+  const n = Math.floor(amount * 70);
+  for (let i = 0; i < n; i++) {
+    const y = Math.random() * H, h = rnd(1, 4);
+    ctx.fillStyle = `rgba(${Math.random() < .5 ? WCOL : '255,255,255'},${rnd(.05, .35) * amount})`;
+    ctx.fillRect(0, y, W, h);
+  }
+  for (let i = 0; i < n * 4; i++) { ctx.fillStyle = `rgba(255,255,255,${rnd(.2, .8)})`; ctx.fillRect(Math.random() * W, Math.random() * H, 2, 2); }
+}
+
+function renderOverlay() {
+  const big = Math.max(34, Math.min(84, W / 12)), sm = Math.max(13, Math.min(20, W / 60));
+  if (state === 'title') {
+    ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 0, W, H);
+    txt('VECTOR FRONT', W / 2, H * .25, big, HUD, 1, 'center');
+    txt('ARMORED WIREFRAME COMBAT', W / 2, H * .25 + big * .85, sm, WCOL, .9, 'center');
+    const lines = ['W / UP ARROW ....... FORWARD', 'S / DOWN ARROW ..... REVERSE', 'A D / LEFT RIGHT ... TURN', 'SPACE .............. FIRE CANNON', 'P PAUSE      M SOUND ON/OFF'];
+    lines.forEach((l, i) => txt(l, W / 2, H * .47 + i * sm * 1.6, sm, HUD, .85, 'center'));
+    txt('HOVER TANK 1000   STRIDER 1500   GUN TOWER 2500', W / 2, H * .47 + 5.6 * sm * 1.6, sm * .8, ECOL, .85, 'center');
+    txt('SHOOT SUPPLY DRONES TO REPAIR ARMOR', W / 2, H * .47 + 6.6 * sm * 1.6, sm * .8, DCOL, .85, 'center');
+    if (Math.sin(T * 5) > -.3) txt('PRESS ENTER TO DEPLOY', W / 2, H * .86, sm * 1.4, HUD, 1, 'center');
+    txt('HIGH SCORE ' + pad(hi, 7), W / 2, H * .93, sm * .9, HUD, .7, 'center');
+  }
+  if (state === 'over') {
+    ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, 0, W, H);
+    txt('GAME OVER', W / 2, H * .36, big, RED, 1, 'center');
+    txt('FINAL SCORE ' + pad(score, 7), W / 2, H * .5, sm * 1.4, HUD, 1, 'center');
+    txt('REACHED WAVE ' + wave, W / 2, H * .5 + sm * 2, sm, HUD, .8, 'center');
+    if (score >= hi && score > 0) txt('NEW HIGH SCORE', W / 2, H * .5 + sm * 4, sm * 1.2, '255,230,120', Math.sin(T * 8) > 0 ? 1 : .5, 'center');
+    if (overT > 1.5 && Math.sin(T * 5) > -.3) txt('PRESS ENTER', W / 2, H * .78, sm * 1.3, HUD, 1, 'center');
+  }
+  if (state === 'dying') txt('SIGNAL LOST', W / 2, H * .4, big * .7, RED, Math.sin(T * 12) > 0 ? 1 : .4, 'center');
+  if (paused) { ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(0, 0, W, H); txt('PAUSED', W / 2, H * .45, big * .8, HUD, 1, 'center'); txt('PRESS P TO RESUME', W / 2, H * .45 + big * .8, sm, HUD, .8, 'center'); }
+}
+
+function render() {
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  camY = 1.5 + Math.sin(T * 11) * .035 * Math.abs(P.v) / 16 + (state === 'dying' ? -.6 * (1 - dieT / 3.2) : 0);
+  CH = Math.cos(P.h); SH = Math.sin(P.h);
+  ctx.save();
+  const s = shake * 9;
+  ctx.translate(rnd(-s, s), rnd(-s, s));
+  ctx.globalCompositeOperation = 'lighter';
+  renderWorld();
+  ctx.restore();
+  ctx.globalCompositeOperation = 'source-over';
+  if (staticT > 0) renderStatic(state === 'dying' ? 1 : staticT * 2);
+  if (flash > 0) { ctx.fillStyle = `rgba(255,120,80,${flash * .35})`; ctx.fillRect(0, 0, W, H); }
+  if (state !== 'title') renderHUD();
+  renderOverlay();
+  ctx.fillStyle = scanPat; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = vignette; ctx.fillRect(0, 0, W, H);
+}
+
+// ---------- main loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  if (!paused) { T += dt; update(dt); }
+  render();
+  requestAnimationFrame(frame);
+}
+document.addEventListener('visibilitychange', () => { if (document.hidden && state === 'play' && !paused) togglePause(); });
+makeWorld(); [P.x, P.z] = clearSpot(); spawnAttract();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
