@@ -1,4 +1,4 @@
-# Vector Front
+# Battle Zone Recreation
 
 An original first-person wireframe tank game that runs in the browser. One HTML file, no downloads, no libraries, no image or sound files.
 
