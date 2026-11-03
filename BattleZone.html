@@ -35,6 +35,9 @@ const PSH  = '235,255,255';   // player shell
 const ESH  = '255,110,80';    // enemy shell
 const HUD  = '255,176,40';    // amber HUD
 const RED  = '255,70,50';
+const PCOL = { ar: '255,80,210', rf: '255,130,40', sh: '120,150,255' };  // power pylons
+const PNAME = { ar: 'ARMOR PLUS', rf: 'DOUBLE FIRE', sh: 'FORCEFIELD' };
+const PYL_RECHARGE = 45, RAPID_TIME = 20, SHIELD_TIME = 30, ARMOR_MAX = 150;
 
 let W, H, DPR, F, HY, scanPat, vignette;
 function resize() {
@@ -121,13 +124,36 @@ const DRONE = (() => {
 const SHELL_P = merge(octM(.28, .28, .5), lines([[0, 0, -.5], [0, 0, -3.2]]));
 const SHELL_E = merge(octM(.45, .45, .45), lines([[0, 0, -.45], [0, 0, -2.4]]));
 const RING = ringM(28);
+// Power pylon: a tall glyph-banded obelisk with a crystal floating above it
+const shift = (m, dx, dy, dz) => ({ v: m.v.map(p => [p[0] + dx, p[1] + dy, p[2] + dz]), e: m.e });
+const OBEL = (() => {
+  const band = y => { const r = 1.5 - (y - .6) / 8 * .5; return frustM(4, r, r, 0, y, Math.PI / 4); };
+  const tv0 = [];
+  for (let i = 0; i < 4; i++) { const a = Math.PI / 4 + i / 4 * TAU; tv0.push([Math.sin(a) * 1.0, 8.6, Math.cos(a) * 1.0]); }
+  const cap = { v: [...tv0, [0, 10.2, 0]], e: [[0, 4], [1, 4], [2, 4], [3, 4]] };
+  return merge(frustM(4, 2.5, 2.2, .6, 0, Math.PI / 4), frustM(4, 1.5, 1.0, 8, .6, Math.PI / 4), cap,
+    band(2.6), band(3.0), band(6.0), band(6.4),
+    lines([[0, 3.6, 1.36], [0, 5.4, 1.27]], [[0, 3.6, -1.36], [0, 5.4, -1.27]], [[1.36, 3.6, 0], [1.27, 5.4, 0]], [[-1.36, 3.6, 0], [-1.27, 5.4, 0]]));
+})();
+const CRYS = {
+  ar: merge(octM(.8, 1.3, .8), lines([[-1.4, 0, 0], [1.4, 0, 0]], [[0, -1.9, 0], [0, 1.9, 0]])),
+  rf: merge(shift(octM(.6, .9, .6), 0, .75, 0), shift(octM(.6, .9, .6), 0, -.75, 0)),
+  sh: merge(octM(.7, 1.1, .7), (() => { const m = ringM(16); m.v = m.v.map(p => [p[0] * 1.7, 0, p[2] * 1.7]); return m; })())
+};
 
 // ---------- world ----------
 let obstacles = [];
 function makeWorld() {
   obstacles = [];
   let tries = 0;
-  while (obstacles.length < 70 && tries++ < 2000) {
+  const kinds = ['ar', 'rf', 'sh', 'ar', 'rf', 'sh', 'ar', 'rf', 'sh'];
+  while (kinds.length && tries++ < 3000) {
+    const x = Math.random() * S, z = Math.random() * S;
+    if (obstacles.some(q => Math.hypot(wrap(q.x - x), wrap(q.z - z)) < 170)) continue;
+    obstacles.push({ pyl: kinds.shift(), m: OBEL, r: 2.3, h: 10.2, x, z, yaw: 0, cd: 0, ph: Math.random() * TAU });
+  }
+  tries = 0;
+  while (obstacles.length < 79 && tries++ < 2000) {
     const x = Math.random() * S, z = Math.random() * S, t = Math.random();
     let o;
     if (t < .32) { const s = rnd(3.5, 6); o = { m: frustM(4, s * .707, s * .707, s, 0, Math.PI / 4), r: s * .62, h: s }; }
@@ -165,6 +191,7 @@ let enemies = [], shells = [], debris = [], rings = [];
 let state = 'title', paused = false, T = 0;
 let score = 0, hi = 0, wave = 1, kills = 0, killsNeeded = 6, nextLife = 30000;
 let spawnT = 0, supplyT = 40, msgText = '', msgT = 0, shake = 0, flash = 0, staticT = 0, dieT = 0, overT = 0;
+let rapidT = 0, shieldT = 0, shieldFx = 0, shieldBeep = 0;
 let lastHit = -10, bumpT = 0, sweep = 0, lockT = 0, locked = null, camY = 1.5, CH = 1, SH = 0;
 try { hi = +localStorage.getItem('vectorfront.hi') || 0; } catch (e) { }
 function saveHi() { if (score > hi) { hi = score; try { localStorage.setItem('vectorfront.hi', hi); } catch (e) { } } }
@@ -224,7 +251,13 @@ const sfx = {
   over() { [392, 330, 262, 196].forEach((f, i) => tone('square', f, f * .98, .35, .1, 0, .3 + i * .35)); },
   drone(v, p) { tone('triangle', 1400, 1750, .06, .07 * v, p); tone('triangle', 1400, 1750, .06, .07 * v, p, .1); },
   start() { tone('sawtooth', 70, 420, .7, .14); nz(.7, .2, 'bandpass', 300, 2500, 4); },
-  dud() { tone('square', 140, 120, .06, .05); }
+  dud() { tone('square', 140, 120, .06, .05); },
+  pyArmor() { [262, 392, 523, 784, 1047, 1568].forEach((f, i) => { tone('sine', f, f, .35, .16, 0, i * .06); tone('triangle', f * 2, f * 2, .2, .05, 0, i * .06); }); nz(.9, .15, 'bandpass', 800, 6000, 6); },
+  pyRapid() { for (let i = 0; i < 8; i++) tone('square', 300 + i * 160, 300 + i * 160, .06, .09, 0, i * .045); tone('sawtooth', 120, 900, .5, .12, 0, .1); },
+  pyShield() { tone('sine', 140, 1300, 1.1, .25); tone('sine', 147, 1310, 1.1, .18); nz(1.2, .3, 'bandpass', 300, 4000, 3); [659, 988, 1319].forEach((f, i) => tone('triangle', f, f, .5, .1, 0, .7 + i * .1)); },
+  shieldHit(v = 1, p = 0) { tone('triangle', 1250, 520, .25, .3 * v, p); tone('sine', 2500, 1800, .12, .1 * v, p); nz(.25, .3 * v, 'highpass', 6000, 2000, .8, p); },
+  powerDown() { [880, 660, 440, 330].forEach((f, i) => tone('square', f, f, .09, .07, 0, i * .08)); },
+  pyDud() { tone('sine', 220, 180, .2, .08); }
 };
 function spatial(x, z) {
   const dx = wrap(x - P.x), dz = wrap(z - P.z), d = Math.hypot(dx, dz) || 1;
@@ -270,6 +303,17 @@ function addScore(n) {
   if (score >= nextLife) { nextLife += 30000; P.lives++; sfx.life(); msg('BONUS TANK'); }
 }
 
+function reloadTime() { return rapidT > 0 ? .375 : .75; }
+function usePylon(q) {
+  if (q.cd > 0) { if (T - (q.dudT || -9) > 1.5) { q.dudT = T; sfx.pyDud(); msg(PNAME[q.pyl] + ' PYLON RECHARGING ' + Math.ceil(q.cd) + 's', 1.4); } return; }
+  q.cd = PYL_RECHARGE;
+  if (q.pyl === 'ar') { P.armor = ARMOR_MAX; sfx.pyArmor(); msg('ARMOR PLUS - ARMOR ' + ARMOR_MAX, 2.4); }
+  if (q.pyl === 'rf') { rapidT = RAPID_TIME; P.reload = 0; sfx.pyRapid(); msg('DOUBLE FIRE RATE - ' + RAPID_TIME + ' SECONDS', 2.4); }
+  if (q.pyl === 'sh') { shieldT = SHIELD_TIME; shieldBeep = 0; shieldFx = 1; sfx.pyShield(); msg('FORCEFIELD ON - ' + SHIELD_TIME + ' SECONDS', 2.4); }
+  addScore(100);
+  rings.push({ x: q.x, z: q.z, r: 1, sp: 30, life: 1.2, col: PCOL[q.pyl] }, { x: q.x, z: q.z, r: 1, sp: 16, life: 1.5, col: '255,255,255' });
+}
+
 // ---------- game flow ----------
 function clearSpot() {
   for (let i = 0; i < 200; i++) { const x = Math.random() * S, z = Math.random() * S; if (!blocked(x, z, 8)) return [x, z]; }
@@ -284,7 +328,7 @@ function startGame() {
   [P.x, P.z] = clearSpot(); P.h = Math.random() * TAU; P.v = 0; P.armor = 100; P.lives = 3; P.reload = 0;
   enemies = []; shells = []; debris = []; rings = [];
   score = 0; wave = 1; kills = 0; killsNeeded = 6; nextLife = 30000;
-  spawnT = 1.5; supplyT = rnd(30, 45); state = 'play'; paused = false;
+  spawnT = 1.5; supplyT = rnd(30, 45); state = 'play'; paused = false; rapidT = shieldT = 0;
   sfx.start(); msg('WAVE 1 - ENGAGE', 2.5);
 }
 function spawnEnemy(type) {
@@ -318,6 +362,7 @@ function nextWave() {
 }
 function damage(n) {
   if (state !== 'play') return;
+  if (shieldT > 0) { sfx.shieldHit(); shieldFx = .5; shake = Math.max(shake, .2); return; }
   P.armor -= n; lastHit = T; shake = Math.min(1.4, shake + n / 35); flash = .55; staticT = .4; sfx.hit();
   if (P.armor <= 0) { P.armor = 0; die(); }
   else if (P.armor < 35) msg('ARMOR CRITICAL', 1.6);
@@ -329,7 +374,7 @@ function die() {
 function respawn() {
   P.lives--;
   if (P.lives <= 0) { state = 'over'; overT = 0; saveHi(); sfx.over(); return; }
-  P.armor = 100; P.v = 0; state = 'play'; shells = [];
+  P.armor = 100; P.v = 0; state = 'play'; shells = []; rapidT = shieldT = 0;
   for (const e of enemies) {
     const d = Math.hypot(wrap(e.x - P.x), wrap(e.z - P.z));
     if (d < 90) { e.dead = true; }
@@ -363,7 +408,7 @@ function killEnemy(e, scored) {
   explode(e.x, e.y + (e.type === 'sk' ? .3 : 0), e.z, m, e.type === 'st' ? e.spin : e.type === 'py' ? e.head : e.yaw, e.type === 'dr' ? DCOL : ECOL, e.type === 'py');
   const s = spatial(e.x, e.z); sfx.boom(s.v, s.p, e.type === 'py');
   if (e.type === 'dr') {
-    if (scored) { addScore(500); P.armor = Math.min(100, P.armor + 50); sfx.repair(); msg('ARMOR RESTORED +50'); }
+    if (scored) { addScore(500); P.armor = Math.max(P.armor, Math.min(100, P.armor + 50)); sfx.repair(); msg('ARMOR RESTORED +50'); }
     return;
   }
   if (scored) addScore(e.type === 'sk' ? 1000 : e.type === 'st' ? 1500 : 2500);
@@ -388,6 +433,7 @@ function update(dt) {
     if (active < maxA && spawnT <= 0) { spawnEnemy(); spawnT = rnd(2, 4.5); }
     supplyT -= dt;
     if (supplyT <= 0) { supplyT = rnd(40, 60); if (!enemies.some(e => e.type === 'dr')) spawnSupply(); }
+    for (const q of obstacles) if (q.pyl && q.cd > 0) { q.cd -= dt; if (q.cd <= 0) q.cd = 0; }
     if (T - lastHit > 4 && P.armor < 100) P.armor = Math.min(100, P.armor + 2.5 * dt);
   }
 
@@ -419,6 +465,11 @@ function updatePlayer(dt) {
   P.v += clamp(target - P.v, -28 * dt, 28 * dt);
   P.h = angN(P.h + turn * 1.1 * dt);
   let nx = P.x + Math.sin(P.h) * P.v * dt, nz = P.z + Math.cos(P.h) * P.v * dt;
+  for (const q of obstacles) {
+    if (!q.pyl) continue;
+    const dx = wrap(nx - q.x), dz = wrap(nz - q.z);
+    if (dx * dx + dz * dz < (q.r + 2.6) ** 2) usePylon(q);
+  }
   const o = blocked(nx, nz, 1.7);
   bumpT -= dt;
   if (o) {
@@ -434,10 +485,16 @@ function updatePlayer(dt) {
   }
   P.x = mod(nx); P.z = mod(nz);
 
+  if (rapidT > 0) { rapidT -= dt; if (rapidT <= 0) { rapidT = 0; sfx.powerDown(); msg('DOUBLE FIRE ENDED', 1.6); } }
+  if (shieldT > 0) {
+    shieldT -= dt;
+    if (shieldT <= 5 && shieldT > 0 && Math.ceil(shieldT) !== shieldBeep) { shieldBeep = Math.ceil(shieldT); sfx.warn(.7, 0); }
+    if (shieldT <= 0) { shieldT = 0; sfx.powerDown(); msg('FORCEFIELD DOWN', 1.6); }
+  }
   P.reload -= dt;
   if (K.fire) {
     if (P.reload <= 0) {
-      P.reload = .75;
+      P.reload = reloadTime();
       shells.push({ own: true, x: mod(P.x + Math.sin(P.h) * 2.5), z: mod(P.z + Math.cos(P.h) * 2.5), y: 1.2,
         vx: Math.sin(P.h) * 95, vz: Math.cos(P.h) * 95, life: 1.6, yaw: P.h });
       sfx.fire(); shake = Math.max(shake, .25);
@@ -489,7 +546,7 @@ function updateEnemies(dt) {
       for (const o of obstacles) { const ox = wrap(e.x - o.x), oz = wrap(e.z - o.z); if (ox * ox + oz * oz < (o.r + 2.5) ** 2) ty = Math.max(ty, o.h + 1.6); }
       e.y += (ty - e.y) * Math.min(1, dt * 6);
       if (live && dist < 60 && T - e.warnT > Math.max(.15, dist / 120)) { const s = spatial(e.x, e.z); sfx.warn(s.v, s.p); e.warnT = T; }
-      if (live && dist < 2.9 && e.y < 3.5) { damage(45); killEnemy(e, false); }
+      if (live && dist < 2.9 && e.y < 3.5) { if (shieldT > 0) { sfx.shieldHit(); shieldFx = .6; killEnemy(e, true); } else { damage(45); killEnemy(e, false); } }
     }
     else if (e.type === 'py') {
       e.cd -= dt;
@@ -556,7 +613,12 @@ function updateShells(dt) {
       }
     } else {
       const dx = wrap(P.x - s.x), dz = wrap(P.z - s.z);
-      if (dx * dx + dz * dz < 1.9 * 1.9 && state === 'play') { s.dead = true; damage(s.dmg); }
+      const shR = shieldT > 0 ? 4 : 1.9;
+      if (dx * dx + dz * dz < shR * shR && state === 'play') {
+        s.dead = true;
+        if (shieldT > 0) rings.push({ x: s.x, z: s.z, r: .3, sp: 14, life: .6, col: PCOL.sh });
+        damage(s.dmg);
+      }
     }
   }
   shells = shells.filter(s => !s.dead);
@@ -577,6 +639,7 @@ function updateFx(dt) {
   debris = debris.filter(d => d.life > 0);
   for (const r of rings) { r.r += r.sp * dt; r.sp *= Math.pow(.25, dt); r.life -= dt * .9; }
   rings = rings.filter(r => r.life > 0);
+  shieldFx = Math.max(0, shieldFx - dt * 1.5);
   shake = Math.max(0, shake - dt * 2.2); flash = Math.max(0, flash - dt * 2.5); staticT = Math.max(0, staticT - dt);
   msgT -= dt;
 }
@@ -596,10 +659,10 @@ function glow(col, a, w = 1.5) {
   ctx.strokeStyle = `rgba(${col},${a * .2})`; ctx.lineWidth = w * 3.6; ctx.stroke();
   ctx.strokeStyle = `rgba(${col},${a})`; ctx.lineWidth = w; ctx.stroke();
 }
-function drawModel(m, x, y, z, yaw, col, al = 1, sc = 1) {
+function drawModel(m, x, y, z, yaw, col, al = 1, sc = 1, cull = 8) {
   const ox = wrap(x - P.x), oz = wrap(z - P.z), dist = Math.hypot(ox, oz);
   if (dist > VIEW) return;
-  const ccz = ox * SH + oz * CH, ccx = ox * CH - oz * SH, rad = 8 * sc;
+  const ccz = ox * SH + oz * CH, ccx = ox * CH - oz * SH, rad = cull * sc;
   if (ccz < -rad || Math.abs(ccx) > ccz * (W / 2 / F) + rad + 4) return;
   let a = al; if (dist > FADE) a *= (VIEW - dist) / (VIEW - FADE);
   const cy = Math.cos(yaw), sy = Math.sin(yaw);
@@ -654,7 +717,13 @@ function renderWorld() {
     const sz = cz < 20 ? 2 : 1.4; ctx.fillRect(sx - sz / 2, sy, sz, sz);
   }
   // obstacles
-  for (const o of obstacles) drawModel(o.m, o.x, 0, o.z, o.yaw, WCOL, .95);
+  for (const o of obstacles) {
+    if (!o.pyl) { drawModel(o.m, o.x, 0, o.z, o.yaw, WCOL, .95); continue; }
+    const c = PCOL[o.pyl], ready = o.cd <= 0, pulse = .75 + .25 * Math.sin(T * 3 + o.ph);
+    drawModel(OBEL, o.x, 0, o.z, 0, c, ready ? pulse : .28, 1, 14);
+    if (ready) drawModel(CRYS[o.pyl], o.x, 11.6 + Math.sin(T * 1.7 + o.ph) * .35, o.z, T * 1.3 + o.ph, c, 1);
+    else drawModel(CRYS[o.pyl], o.x, 11.6, o.z, o.ph, c, .12 + .2 * (1 - o.cd / PYL_RECHARGE));
+  }
   // enemies
   for (const e of enemies) {
     const col = e.hitT > 0 ? '255,255,255' : ECOL;
@@ -772,6 +841,13 @@ function renderHUD() {
     ctx.shadowColor = `rgba(${e.type === 'dr' ? DCOL : RED},1)`; ctx.shadowBlur = 8;
     ctx.fillRect(bx - 2.5, by - 2.5, 5, 5); ctx.shadowBlur = 0;
   }
+  for (const q of obstacles) {
+    if (!q.pyl) continue;
+    const dx = wrap(q.x - P.x), dz = wrap(q.z - P.z); if (dx * dx + dz * dz > 165 * 165) continue;
+    const bx = rcx + (dx * CH - dz * SH) / 170 * RR, by = rcy - (dx * SH + dz * CH) / 170 * RR;
+    ctx.beginPath(); ctx.moveTo(bx, by - 4); ctx.lineTo(bx + 3, by); ctx.lineTo(bx, by + 4); ctx.lineTo(bx - 3, by); ctx.closePath();
+    glow(PCOL[q.pyl], q.cd > 0 ? .3 : .95, 1.2);
+  }
   ctx.fillStyle = `rgba(${HUD},1)`; ctx.fillRect(rcx - 1.5, rcy - 1.5, 3, 3);
 
   // armor / cannon / lives
@@ -783,10 +859,17 @@ function renderHUD() {
     const fill = clamp(P.armor / 10 - i, 0, 1);
     ctx.strokeStyle = `rgba(${acol},.5)`; ctx.lineWidth = 1; ctx.strokeRect(bx0 + i * (sw + gap) + .5, by0 + 12.5, sw, 12);
     if (fill > 0) { ctx.fillStyle = `rgba(${acol},${(low ? .5 + .5 * pul : .85) * fill})`; ctx.fillRect(bx0 + i * (sw + gap), by0 + 12, sw * fill, 13); }
+    const over = clamp((P.armor - 100) / 5 - i, 0, 1);
+    if (over > 0) { ctx.fillStyle = `rgba(${PCOL.ar},${.9 * over})`; ctx.fillRect(bx0 + i * (sw + gap), by0 + 12, sw * over, 13); }
   }
+  if (P.armor > 100) txt('+' + Math.ceil(P.armor - 100), bx0 + bw, by0, sm * .85, PCOL.ar, 1, 'right');
+  let py0 = by0 - 50;
+  if (shieldT > 0) { txt('FORCEFIELD ' + Math.ceil(shieldT) + 's', bx0, py0, sm * .85, PCOL.sh, shieldT < 5 && Math.sin(T * 12) < 0 ? .35 : 1); py0 -= sm * 1.3; }
+  if (rapidT > 0) txt('DOUBLE FIRE ' + Math.ceil(rapidT) + 's', bx0, py0, sm * .85, PCOL.rf, rapidT < 4 && Math.sin(T * 12) < 0 ? .35 : 1);
   const ready = P.reload <= 0;
-  txt(ready ? 'CANNON READY' : 'LOADING', bx0, by0 + 44, sm * .8, HUD, ready ? 1 : .6);
-  ctx.fillStyle = `rgba(${HUD},.8)`; ctx.fillRect(bx0, by0 + 56, bw * clamp(1 - P.reload / .75, 0, 1), 3);
+  const ccol = rapidT > 0 ? PCOL.rf : HUD;
+  txt(ready ? (rapidT > 0 ? 'CANNON READY  2X' : 'CANNON READY') : 'LOADING', bx0, by0 + 44, sm * .8, ccol, ready ? 1 : .6);
+  ctx.fillStyle = `rgba(${ccol},.8)`; ctx.fillRect(bx0, by0 + 56, bw * clamp(1 - P.reload / reloadTime(), 0, 1), 3);
   for (let i = 0; i < Math.min(P.lives, 8); i++) {
     const lx = W - 34 - i * 30, ly = by0 - 26;
     ctx.beginPath(); ctx.moveTo(lx - 11, ly + 5); ctx.lineTo(lx + 11, ly + 5); ctx.lineTo(lx + 8, ly); ctx.lineTo(lx - 8, ly); ctx.closePath();
@@ -811,6 +894,22 @@ function renderStatic(amount) {
   for (let i = 0; i < n * 4; i++) { ctx.fillStyle = `rgba(255,255,255,${rnd(.2, .8)})`; ctx.fillRect(Math.random() * W, Math.random() * H, 2, 2); }
 }
 
+function renderShield() {
+  const fl = shieldT < 5 ? (Math.sin(T * 18) > 0 ? 1 : .35) : 1, a = (.35 + .15 * Math.sin(T * 4) + shieldFx * .6) * fl;
+  ctx.save(); ctx.globalCompositeOperation = 'lighter';
+  ctx.fillStyle = `rgba(${PCOL.sh},${.04 + shieldFx * .12})`; ctx.fillRect(0, 0, W, H);
+  ctx.beginPath(); ctx.ellipse(W / 2, H / 2, W * .58, H * .62, 0, 0, TAU); glow(PCOL.sh, a, 2);
+  ctx.beginPath(); ctx.ellipse(W / 2, H / 2, W * .61, H * .66, 0, 0, TAU); glow(PCOL.sh, a * .5, 1.2);
+  const n = 28, hr = Math.max(10, W / 70);
+  ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const t = i / n * TAU + T * .15, cx = W / 2 + Math.cos(t) * W * .595, cy = H / 2 + Math.sin(t) * H * .64;
+    for (let k = 0; k <= 6; k++) { const q = k / 6 * TAU, x = cx + Math.cos(q) * hr, y = cy + Math.sin(q) * hr; k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+  }
+  glow(PCOL.sh, a * .6, 1);
+  ctx.restore();
+}
+
 function renderOverlay() {
   const big = Math.max(34, Math.min(84, W / 12)), sm = Math.max(13, Math.min(20, W / 60));
   if (state === 'title') {
@@ -821,6 +920,11 @@ function renderOverlay() {
     lines.forEach((l, i) => txt(l, W / 2, H * .47 + i * sm * 1.6, sm, HUD, .85, 'center'));
     txt('HOVER TANK 1000   STRIDER 1500   GUN TOWER 2500', W / 2, H * .47 + 5.6 * sm * 1.6, sm * .8, ECOL, .85, 'center');
     txt('SHOOT SUPPLY DRONES TO REPAIR ARMOR', W / 2, H * .47 + 6.6 * sm * 1.6, sm * .8, DCOL, .85, 'center');
+    const ly = H * .47 + 7.6 * sm * 1.6, ls = sm * .8;
+    ctx.font = `bold ${ls}px "Courier New",Consolas,monospace`;
+    const parts = [['DRIVE INTO PYLONS:  ', HUD], ['ARMOR PLUS   ', PCOL.ar], ['DOUBLE FIRE   ', PCOL.rf], ['30s FORCEFIELD', PCOL.sh]];
+    let lx = W / 2 - parts.reduce((w, p) => w + ctx.measureText(p[0]).width, 0) / 2;
+    for (const [t, c] of parts) { txt(t, lx, ly, ls, c, .9); lx += ctx.measureText(t).width; }
     if (Math.sin(T * 5) > -.3) txt('PRESS ENTER TO DEPLOY', W / 2, H * .86, sm * 1.4, HUD, 1, 'center');
     txt('HIGH SCORE ' + pad(hi, 7), W / 2, H * .93, sm * .9, HUD, .7, 'center');
   }
@@ -849,6 +953,7 @@ function render() {
   ctx.restore();
   ctx.globalCompositeOperation = 'source-over';
   if (staticT > 0) renderStatic(state === 'dying' ? 1 : staticT * 2);
+  if (shieldT > 0 && state === 'play') renderShield();
   if (flash > 0) { ctx.fillStyle = `rgba(255,120,80,${flash * .35})`; ctx.fillRect(0, 0, W, H); }
   if (state !== 'title') renderHUD();
   renderOverlay();
