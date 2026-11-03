@@ -192,6 +192,8 @@ let state = 'title', paused = false, T = 0;
 let score = 0, hi = 0, wave = 1, kills = 0, killsNeeded = 6, nextLife = 30000;
 let spawnT = 0, supplyT = 40, msgText = '', msgT = 0, shake = 0, flash = 0, staticT = 0, dieT = 0, overT = 0;
 let rapidT = 0, shieldT = 0, shieldFx = 0, shieldBeep = 0;
+let turnHeld = 0, turnDir = 0;   // two-stage slew: fine aim first, then full speed
+const SLEW_SLOW = .35, SLEW_FAST = 1.1, SLEW_DELAY = 1;
 let lastHit = -10, bumpT = 0, sweep = 0, lockT = 0, locked = null, camY = 1.5, CH = 1, SH = 0;
 try { hi = +localStorage.getItem('vectorfront.hi') || 0; } catch (e) { }
 function saveHi() { if (score > hi) { hi = score; try { localStorage.setItem('vectorfront.hi', hi); } catch (e) { } } }
@@ -463,7 +465,8 @@ function updatePlayer(dt) {
   const fwd = (K.up ? 1 : 0) - (K.down ? 1 : 0), turn = (K.right ? 1 : 0) - (K.left ? 1 : 0);
   const target = fwd > 0 ? 16 : fwd < 0 ? -9 : 0;
   P.v += clamp(target - P.v, -28 * dt, 28 * dt);
-  P.h = angN(P.h + turn * 1.1 * dt);
+  if (turn !== turnDir) { turnDir = turn; turnHeld = 0; } else if (turn) turnHeld += dt;
+  P.h = angN(P.h + turn * (turnHeld < SLEW_DELAY ? SLEW_SLOW : SLEW_FAST) * dt);
   let nx = P.x + Math.sin(P.h) * P.v * dt, nz = P.z + Math.cos(P.h) * P.v * dt;
   for (const q of obstacles) {
     if (!q.pyl) continue;

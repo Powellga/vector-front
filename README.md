@@ -18,7 +18,7 @@ Open `BattleZone.html` in any modern browser and press Enter.
 | --- | --- |
 | W / Up arrow | Forward |
 | S / Down arrow | Reverse |
-| A, D / Left, Right | Turn |
+| A, D / Left, Right | Turn (slow for the first second for fine aiming, then full speed) |
 | Space | Fire cannon |
 | P | Pause |
 | M | Sound on/off |
